@@ -41,6 +41,7 @@ In your forked repository:
 |-------------|-------------|---------|
 | `IGPSPORT_USERNAME` | Your iGPSport username/email | `your_username` |
 | `IGPSPORT_PASSWORD` | Your iGPSport password | `your_password` |
+| `IGPSPORT_REGION` | Your iGPSport account region (optional, default by `cn`) | `global` (or `cn` for iGPSport China users) |
 | `GARMIN_EMAIL` | Your Garmin Connect email | `user@example.com` |
 | `GARMIN_PASSWORD` | Your Garmin Connect password | `your_garmin_password` |
 | `GARMIN_DOMAIN` | Garmin domain (optional) | `garmin.com` (or `garmin.cn` for Garmin China users) |

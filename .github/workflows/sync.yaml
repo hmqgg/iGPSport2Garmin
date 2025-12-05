@@ -43,6 +43,7 @@ jobs:
         env:
           IGPSPORT_USERNAME: ${{ secrets.IGPSPORT_USERNAME }}
           IGPSPORT_PASSWORD: ${{ secrets.IGPSPORT_PASSWORD }}
+          IGPSPORT_REGION: ${{ secrets.IGPSPORT_REGION || 'cn' }}
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           GARMIN_DOMAIN: ${{ secrets.GARMIN_DOMAIN || 'garmin.com' }}
