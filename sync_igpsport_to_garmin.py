@@ -344,6 +344,11 @@ class GarminClient:
                     )
                     time.sleep(extra_delay)
 
+                # 409 Conflict detection - skip this activity and continue
+                if "409" in str(e).lower() or "conflict" in str(e).lower():
+                    logger.warning(f"409 Conflict detected. Skipping activity {activity_name}")
+                    return None
+
                 if retries > self.max_retries:
                     logger.error(
                         f"Failed to upload after {self.max_retries} attempts. Last error: {last_error}"
