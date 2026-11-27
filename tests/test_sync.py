@@ -3,8 +3,10 @@ import os
 import tempfile
 import unittest
 from contextlib import chdir
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
+from zipfile import ZipFile
 
 import requests
 from garminconnect.client import Client
@@ -162,6 +164,89 @@ class SyncTests(unittest.TestCase):
             [c.args[0] for c in self.source.download_fit_file.call_args_list],
             ["fixture-2", "fixture-3"],
         )
+
+    def test_empty_success_list_is_verified_without_reposting(self):
+        os.environ["GARMIN_TOKENS"] = TOKENS
+        self.rows[:] = self.rows[:1]
+        archive = BytesIO()
+        with ZipFile(archive, "w") as z:
+            z.writestr("original/ride.FIT", b"fixture FIT")
+        original = requests.Response()
+        original.status_code = 200
+        original._content = archive.getvalue()
+        entry = {
+            "activityId": 42,
+            "startTimeLocal": "2026-11-26T01:00:00",
+            "duration": 600,
+        }
+        self.http.side_effect = [
+            response(200, []),
+            response(
+                202,
+                {
+                    "detailedImportResult": {
+                        "uploadId": 123,
+                        "successes": [],
+                        "failures": [],
+                    }
+                },
+            ),
+            response(200, []),  # Garmin is still indexing the import.
+            response(200, [entry]),
+            response(200, []),
+            original,
+        ]
+        self.assertEqual(sync.main([]), 0)
+        self.assertEqual(sum(c.args[1] == "POST" for c in self.http.call_args_list), 1)
+        self.assertEqual(
+            json.loads(self.state.read_text())["last_sync_date"],
+            entry["startTimeLocal"],
+        )
+
+    def test_unrelated_fit_cannot_confirm_an_accepted_upload(self):
+        os.environ["GARMIN_TOKENS"] = TOKENS
+        self.rows[:] = self.rows[:1]
+        entry = {
+            "activityId": 42,
+            "startTimeLocal": "2026-11-26T01:00:00",
+            "duration": 600,
+        }
+        self.http.side_effect = [
+            response(200, []),
+            response(
+                202,
+                {
+                    "detailedImportResult": {
+                        "uploadId": 123,
+                        "successes": [],
+                        "failures": [],
+                    }
+                },
+            ),
+        ] + [
+            response(200, [entry]),
+            response(200, []),
+            response(200, "another file"),
+        ] * 4
+        self.assertEqual(sync.main([]), 1)
+        self.assertEqual(sum(c.args[1] == "POST" for c in self.http.call_args_list), 1)
+        self.assertEqual(self.state.read_text(), self.original)
+
+    def test_existing_identical_fit_is_not_uploaded_even_if_clocks_differ(self):
+        os.environ["GARMIN_TOKENS"] = TOKENS
+        self.rows[:] = self.rows[:1]
+        entry = {
+            "activityId": 42,
+            "startTimeLocal": "2026-11-26T09:00:00",
+            "duration": 600,
+        }
+        original = requests.Response()
+        original.status_code = 200
+        original._content = b"fixture FIT"
+        self.http.side_effect = [response(200, [entry]), response(200, []), original]
+        self.assertEqual(sync.main([]), 0)
+        self.assertTrue(all(c.args[1] == "GET" for c in self.http.call_args_list))
+        self.assertNotEqual(self.state.read_text(), self.original)
 
     def test_unconfirmed_import_does_not_advance_checkpoint(self):
         os.environ["GARMIN_TOKENS"] = TOKENS

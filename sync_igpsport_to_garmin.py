@@ -16,8 +16,10 @@ import random
 import tempfile
 import time
 from getpass import getpass
+from io import BytesIO
 from pathlib import Path
 from typing import ClassVar
+from zipfile import BadZipFile, ZipFile
 
 import requests
 from dateutil.parser import parse
@@ -25,6 +27,7 @@ from garminconnect import (
     Garmin,
     GarminConnectAuthenticationError,
     GarminConnectConnectionError,
+    GarminConnectNotFoundError,
     GarminConnectTooManyRequestsError,
 )
 
@@ -216,8 +219,8 @@ def save_garmin_session(api: Garmin) -> None:
     )
 
 
-def garmin_activity_times(api: Garmin, candidates: list[dict]) -> list:
-    # Include overnight activities and the five-minute overlap window.
+def list_garmin_activities(api: Garmin, candidates: list[dict]) -> list:
+    # Allow adjacent local dates when the source and Garmin display different time zones.
     first_day = min(a["start_time"].date() for a in candidates) - datetime.timedelta(
         days=1
     )
@@ -228,11 +231,8 @@ def garmin_activity_times(api: Garmin, candidates: list[dict]) -> list:
         ).date()
         for a in candidates
     )
-    recent = api.get_activities_by_date(first_day.isoformat(), last_day.isoformat())
-    return [
-        (parse(a["startTimeLocal"], ignoretz=True), a.get("duration", 0))
-        for a in recent
-    ]
+    last_day += datetime.timedelta(days=1)
+    return api.get_activities_by_date(first_day.isoformat(), last_day.isoformat())
 
 
 def connect_garmin(candidates: list[dict]) -> tuple[Garmin, list]:
@@ -246,7 +246,7 @@ def connect_garmin(candidates: list[dict]) -> tuple[Garmin, list]:
             logger.warning("Saved Garmin session could not be read")
         else:
             try:
-                return api, garmin_activity_times(api, candidates)
+                return api, list_garmin_activities(api, candidates)
             except GarminConnectAuthenticationError:
                 if seed:
                     raise
@@ -257,11 +257,82 @@ def connect_garmin(candidates: list[dict]) -> tuple[Garmin, list]:
     else:
         password_login(api)
     save_garmin_session(api)
-    return api, garmin_activity_times(api, candidates)
+    return api, list_garmin_activities(api, candidates)
 
 
-def upload_fit(api: Garmin, fit_data: bytes, activity_id: int) -> bool:
+def contains_fit(original: bytes, fit_data: bytes) -> bool:
+    """Garmin serves the original FIT either directly or inside a ZIP."""
+    if original == fit_data:
+        return True
+    try:
+        with ZipFile(BytesIO(original)) as archive:
+            return any(
+                f.filename.lower().endswith(".fit")
+                and f.file_size == len(fit_data)
+                and archive.read(f) == fit_data
+                for f in archive.infolist()
+            )
+    except BadZipFile:
+        return False
+
+
+def find_original_fit(
+    api: Garmin, rows: list[dict], ride: dict, fit_data: bytes
+) -> bool:
+    # Time and duration only narrow the download list. Only matching bytes
+    # confirm that Garmin stored this particular ride.
+    for row in rows:
+        start = parse(row["startTimeLocal"], ignoretz=True)
+        if abs((start.date() - ride["start_time"].date()).days) > 1:
+            continue
+        near_start = abs((start - ride["start_time"]).total_seconds()) <= 60
+        near_duration = ride["duration"] > 0 and any(
+            isinstance(row.get(key), (float, int))
+            and abs(row[key] - ride["duration"]) <= 5
+            for key in ("duration", "movingDuration", "elapsedDuration")
+        )
+        if not row.get("activityId") or not (near_start or near_duration):
+            continue
+        try:
+            original = api.download_activity(
+                row["activityId"], api.ActivityDownloadFormat.ORIGINAL
+            )
+        except GarminConnectNotFoundError:
+            continue
+        if contains_fit(original, fit_data):
+            return True
+    return False
+
+
+def confirm_import(api: Garmin, result: object, ride: dict, fit_data: bytes) -> None:
+    activity_id = ride["activity_id"]
+    receipt = result.get("detailedImportResult") if isinstance(result, dict) else None
+    if isinstance(receipt, dict):
+        if receipt.get("failures"):
+            raise RuntimeError(
+                f"Garmin reported an import failure for activity {activity_id}"
+            )
+        if receipt.get("successes"):
+            return
+
+    # A completed POST can return an uploadId with two empty result lists.
+    # Read the result back while it is being indexed. Never repeat the POST here.
+    logger.info("Checking Garmin's original FIT for activity %s", activity_id)
+    for delay in (0, 3, 8, 15):
+        if delay:
+            time.sleep(delay)
+        rows = list_garmin_activities(api, [ride])
+        if find_original_fit(api, rows, ride, fit_data):
+            logger.info(
+                "Verified the original FIT on Garmin for activity %s", activity_id
+            )
+            return
+    raise RuntimeError(f"Garmin has not confirmed import of activity {activity_id}")
+
+
+def upload_fit(api: Garmin, fit_data: bytes, ride: dict) -> bool:
     """Return False when Garmin already has the activity (HTTP 409)."""
+    activity_id = ride["activity_id"]
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "activity.fit"
         path.write_bytes(fit_data)
@@ -288,19 +359,7 @@ def upload_fit(api: Garmin, fit_data: bytes, activity_id: int) -> bool:
                 )
                 time.sleep(delay)
             else:
-                receipt = (
-                    result.get("detailedImportResult")
-                    if isinstance(result, dict)
-                    else None
-                )
-                if (
-                    not isinstance(receipt, dict)
-                    or not receipt.get("successes")
-                    or receipt.get("failures")
-                ):
-                    raise RuntimeError(
-                        f"Garmin did not confirm upload of activity {activity_id}"
-                    )
+                confirm_import(api, result, ride, fit_data)
                 return True
 
 
@@ -425,7 +484,11 @@ def sync() -> None:
         return
 
     logger.info("Found %d iGPSport activities to check", len(candidates))
-    garmin, garmin_times = connect_garmin(candidates)
+    garmin, recent = connect_garmin(candidates)
+    garmin_times = [
+        (parse(row["startTimeLocal"], ignoretz=True), row.get("duration", 0))
+        for row in recent
+    ]
 
     uploaded = 0
     for activity in candidates:
@@ -443,7 +506,12 @@ def sync() -> None:
             raise RuntimeError(
                 f"Failed to download FIT file for activity {activity_id}"
             )
-        if upload_fit(garmin, fit_data, activity_id):
+        if find_original_fit(garmin, recent, activity, fit_data):
+            logger.info(
+                "Garmin already has the original FIT for activity %s", activity_id
+            )
+            continue
+        if upload_fit(garmin, fit_data, activity):
             logger.info("Uploaded activity %s", activity_id)
             uploaded += 1
             time.sleep(2)
