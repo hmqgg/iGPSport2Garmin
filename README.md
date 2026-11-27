@@ -42,9 +42,34 @@ In your forked repository:
 | `IGPSPORT_USERNAME` | Your iGPSport username/email | `your_username` |
 | `IGPSPORT_PASSWORD` | Your iGPSport password | `your_password` |
 | `IGPSPORT_REGION` | Your iGPSport account region (optional, default by `cn`) | `global` (or `cn` for iGPSport China users) |
-| `GARMIN_EMAIL` | Your Garmin Connect email | `user@example.com` |
-| `GARMIN_PASSWORD` | Your Garmin Connect password | `your_garmin_password` |
+| `GARMIN_EMAIL` | Garmin Connect email for password login | `user@example.com` |
+| `GARMIN_PASSWORD` | Garmin Connect password for password login | `your_garmin_password` |
 | `GARMIN_DOMAIN` | Garmin domain (optional) | `garmin.com` (or `garmin.cn` for Garmin China users) |
+| `GARMIN_TOKENS` | Renewable Garmin session from the local login below. This also enables encrypted session caching. | Contents of `garmin_tokens.json` |
+| `GARMIN_SESSION_KEY` | Optional for password-only login. Set a random secret to keep refreshed sessions between runners. | Generate with `openssl rand -base64 32` |
+
+#### Set up a Garmin session for Actions
+
+If Garmin asks for a verification code or the runner gets HTTP 429, wait for the rate limit to clear. Then sign in once on your own computer. From the repository directory with Python 3.12 or newer:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+python sync_igpsport_to_garmin.py --garmin-login
+```
+
+For Garmin China, set `GARMIN_DOMAIN=garmin.cn` for this command and in Actions. The command prompts for your Garmin email, password and any verification code. This login-only command saves a session to `garmin_session/garmin_tokens.json`.
+
+Set the **`GARMIN_TOKENS`** repository secret to the full JSON file contents. With GitHub CLI signed in to your fork, you can do this without printing the tokens:
+
+```sh
+gh secret set GARMIN_TOKENS < garmin_session/garmin_tokens.json
+```
+
+Actions can use this secret without `GARMIN_EMAIL` or `GARMIN_PASSWORD`. Refreshed tokens are encrypted before caching. Replacing the bootstrap secret starts a new session. Old Garth session files cannot be reused.
+
+For password-only setups, the existing email and password secrets still work when Garmin accepts a runner login. Add `GARMIN_SESSION_KEY` to enable encrypted caching, or the next fresh runner with new activities will need to sign in again.
 
 ### Step 3: Enable GitHub Actions
 
@@ -56,7 +81,7 @@ In your forked repository:
 
 ### GitHub Actions Workflow Details
 
-The repository includes a pre-configured workflow (`.github/workflows/sync.yml`) that:
+The repository includes a pre-configured workflow (`.github/workflows/sync.yaml`) that:
 
 - Runs automatically every 20 minutes
 - Can be triggered manually
@@ -69,9 +94,9 @@ The repository includes a pre-configured workflow (`.github/workflows/sync.yml`)
 
 On the first run, the script will:
 
-1. Create a `last_sync_date.json` file to track sync progress
-2. Sync activities from the last 30 days
-3. Create a `garmin_session` directory to store authentication data
+1. Read `last_sync_date.json` if present, or look back 30 days on a new setup
+2. Check candidate activities against Garmin and upload missing FIT files
+3. Save sync progress after all candidates are accounted for
 
 ### Subsequent Runs
 
@@ -80,7 +105,7 @@ The script will only sync new activities since the last successful sync, making 
 ## How It Works
 
 1. **Authentication**:
-   - Logs into both iGPSport and Garmin Connect
+   - Checks iGPSport first and opens a Garmin session only when there are candidates
    - Maintains session data for efficiency
 
 2. **Activity Discovery**:
@@ -94,7 +119,7 @@ The script will only sync new activities since the last successful sync, making 
 4. **Sync Process**:
    - Downloads FIT files from iGPSport
    - Uploads them to Garmin Connect
-   - Updates sync tracking data
+   - Saves the latest confirmed date after the batch completes. A fingerprint of the rides on that day lets idle runs skip Garmin while still picking up a late ride from the same day.
 
 ## Configuration Files
 
@@ -109,7 +134,7 @@ The script will only sync new activities since the last successful sync, making 
 
 1. **Authentication Failures**:
    - Verify your credentials are correct
-   - Check if you have 2FA enabled (failed if enabled)
+   - For MFA or a rejected session, repeat the local Garmin login above and replace the `GARMIN_TOKENS` secret
    - Ensure environment variables are set correctly
 
 2. **No Activities Found**:
@@ -121,8 +146,8 @@ The script will only sync new activities since the last successful sync, making 
    - Check Garmin Connect service status if uploads consistently fail
 
 4. **Rate Limiting**:
-   - The script includes built-in delays and retry mechanisms
-   - If you encounter persistent rate limiting, consider reducing sync frequency
+   - HTTP 429 stops the run and leaves the sync date intact. Wait before running again.
+   - If the runner cannot sign in, use the local session setup above.
 
 ## Security Considerations
 
@@ -134,7 +159,7 @@ The script will only sync new activities since the last successful sync, making 
 ## Dependencies
 
 - **requests**: HTTP client for API calls
-- **garth**: Garmin Connect API client
+- **garminconnect**: Garmin Connect API client and renewable session storage
 - **python-dateutil**: Date/time parsing utilities
 
 ## Disclaimer

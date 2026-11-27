@@ -1,2 +1,4 @@
 garmin_session.json
 garmin_session/
+__pycache__/
+.venv/

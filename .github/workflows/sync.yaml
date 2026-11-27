@@ -5,41 +5,36 @@ on:
     - cron: '*/20 * * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+concurrency:
+  group: igpsport-garmin-sync
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-          
-      - name: Cache pip dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          cache: pip
 
-      - name: Restore Garmin session cache
-        uses: actions/cache@v3
-        with:
-          path: garmin_session
-          key: ${{ runner.os }}-garmin-session-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-garmin-session-
-          
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests garth python-dateutil
-          
+        run: python -m pip install -r requirements.txt
+
+      - name: Restore encrypted Garmin session
+        uses: actions/cache/restore@v6
+        with:
+          path: garmin_session/session.gpg
+          key: garmin-di-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: garmin-di-v1-
+
       - name: Run sync script
+        id: sync
         env:
           IGPSPORT_USERNAME: ${{ secrets.IGPSPORT_USERNAME }}
           IGPSPORT_PASSWORD: ${{ secrets.IGPSPORT_PASSWORD }}
@@ -47,17 +42,25 @@ jobs:
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           GARMIN_DOMAIN: ${{ secrets.GARMIN_DOMAIN || 'garmin.com' }}
-        run: python sync_igpsport_to_garmin.py
-        
-      - name: Commit changes
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add last_sync_date.json
-          git diff --quiet && git diff --staged --quiet || git commit -m "Update last sync date [skip ci]"
-          
-      - name: Push changes
-        uses: ad-m/github-push-action@master
+          GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
+          GARMIN_SESSION_KEY: ${{ secrets.GARMIN_SESSION_KEY }}
+        run: bash .github/scripts/sync.sh
+
+      - name: Save refreshed Garmin session
+        if: ${{ !cancelled() && steps.sync.outputs.session_changed == 'true' }}
+        uses: actions/cache/save@v6
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ github.ref }}
+          path: garmin_session/session.gpg
+          key: garmin-di-v1-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save sync progress
+        run: |
+          if [[ -f last_sync_date.json ]]; then
+            git add last_sync_date.json
+            if ! git diff --cached --quiet; then
+              git config user.email "action@github.com"
+              git config user.name "GitHub Action"
+              git commit -m "Update last sync date [skip ci]"
+              git push
+            fi
+          fi
